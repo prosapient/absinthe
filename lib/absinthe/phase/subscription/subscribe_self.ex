@@ -17,11 +17,12 @@ defmodule Absinthe.Phase.Subscription.SubscribeSelf do
 
   def do_subscription(%{type: :subscription} = op, blueprint, options) do
     context = blueprint.execution.context
-    pubsub = ensure_pubsub!(context)
 
     %{selections: [field]} = op
 
-    with {:ok, config} <- get_config(field, context, blueprint) do
+    with :ok <- ensure_not_stopping(),
+         {:ok, config} <- get_config(field, context, blueprint) do
+      pubsub = ensure_pubsub!(context)
       field_keys = get_field_keys(field, config)
       subscription_id = get_subscription_id(config, blueprint, options)
 
@@ -34,6 +35,22 @@ defmodule Absinthe.Phase.Subscription.SubscribeSelf do
          {Phase.Telemetry, Keyword.put(options, :event, [:execute, :operation, :stop])}
        ]}
     else
+      {:error, :pubsub_stopping} ->
+        blueprint =
+          update_in(
+            blueprint.execution.validation_errors,
+            &[
+              %Absinthe.Phase.Error{message: "Pubsub stopping", phase: __MODULE__, locations: []}
+              | &1
+            ]
+          )
+
+        error_pipeline = [
+          {Phase.Document.Result, options}
+        ]
+
+        {:replace, blueprint, error_pipeline}
+
       {:error, error} ->
         blueprint = update_in(blueprint.execution.validation_errors, &[error | &1])
 
@@ -98,6 +115,13 @@ defmodule Absinthe.Phase.Subscription.SubscribeSelf do
 
     find_field_keys!(config)
     |> Enum.map(fn key -> {name, key} end)
+  end
+
+  defp ensure_not_stopping do
+    case GracefulStop.get_status() do
+      :stopping -> {:error, :pubsub_stopping}
+      _ -> :ok
+    end
   end
 
   defp ensure_pubsub!(context) do
